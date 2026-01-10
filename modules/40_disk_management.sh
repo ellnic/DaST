@@ -716,7 +716,26 @@ diskmgmt__sigscan_pick_disk_menu() {
   local line NAME SIZE TRAN ROTA RM MODEL
   while IFS= read -r line; do
     NAME="" SIZE="" TRAN="" ROTA="" RM="" MODEL=""
-    eval "$line" 2>/dev/null || continue
+    # Safe parse of lsblk -P output (no eval; values may contain spaces)
+    local rest key val
+    rest="$line"
+    while [[ -n "$rest" ]]; do
+      if [[ "$rest" =~ ^([A-Z0-9_]+)=\"([^\"]*)\"[[:space:]]*(.*)$ ]]; then
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
+        rest="${BASH_REMATCH[3]}"
+        case "$key" in
+          NAME)  NAME="$val" ;;
+          SIZE)  SIZE="$val" ;;
+          TRAN)  TRAN="$val" ;;
+          ROTA)  ROTA="$val" ;;
+          RM)    RM="$val" ;;
+          MODEL) MODEL="$val" ;;
+        esac
+      else
+        break
+      fi
+    done
     [[ -z "$NAME" ]] && continue
     [[ "$NAME" == loop* ]] && continue
     [[ "$NAME" == zram* ]] && continue

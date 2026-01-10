@@ -547,8 +547,7 @@ boot_backup_restore() {
 
 
   if [[ -f "$dir/files/grub.cfg" ]]; then
-    boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore /boot/grub/grub.cfg ?\n\nDefault is No." || true
-    if [[ $? -eq 0 ]]; then
+    if boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore /boot/grub/grub.cfg ?\n\nDefault is No." ; then
       cp -a /boot/grub/grub.cfg "/boot/grub/grub.cfg.bak.$(date '+%Y%m%d-%H%M%S')" 2>/dev/null || true
       cp -a "$dir/files/grub.cfg" /boot/grub/grub.cfg 2>/dev/null || true
     fi
@@ -558,8 +557,7 @@ boot_backup_restore() {
 # Actually restore /etc/default/grub cleanly
 # The file is saved as "grub" by cp -a /etc/default/grub into files/
   if [[ -f "$dir/files/grub" ]]; then
-    boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore /etc/default/grub ?\n\nDefault is No." || true
-    if [[ $? -eq 0 ]]; then
+    if boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore /etc/default/grub ?\n\nDefault is No." ; then
       cp -a /etc/default/grub "/etc/default/grub.bak.$(date '+%Y%m%d-%H%M%S')" 2>/dev/null || true
       cp -a "$dir/files/grub" /etc/default/grub 2>/dev/null || true
     fi
@@ -567,8 +565,7 @@ boot_backup_restore() {
 
   # Restore systemd-boot dirs if present
   if [[ -d "$dir/files/loader" ]]; then
-    boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore loader directory backup to /boot/loader ?\n\nDefault is No." || true
-    if [[ $? -eq 0 ]]; then
+    if boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore loader directory backup to /boot/loader ?\n\nDefault is No." ; then
       mkdir -p /boot >/dev/null 2>&1 || true
       cp -a "$dir/files/loader" "/boot/loader.restore.$(date '+%Y%m%d-%H%M%S')" 2>/dev/null || true
       rm -rf /boot/loader 2>/dev/null || true
@@ -581,8 +578,7 @@ boot_backup_restore() {
     local mp
     mp="$(boot_esp_mountpoint_current || true)"
     if [[ -n "$mp" ]]; then
-      boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore backed up ESP items to:\n\n$mp\n\nDefault is No." || true
-      if [[ $? -eq 0 ]]; then
+      if boot_confirm_defaultno "$BOOTLOADER_TITLE" "Restore backed up ESP items to:\n\n$mp\n\nDefault is No." ; then
         ui_programbox "$BOOTLOADER_TITLE" "\
           set -e; \
           cp -a '$dir/esp/'* '$mp/' 2>/dev/null || true; \
