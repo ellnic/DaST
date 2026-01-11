@@ -240,6 +240,12 @@ users__crumb() {
 }
 
 users__current_user() {
+  # Prefer DaST's invoker user if available.
+  if [[ -n "${DAST_INVOKER_USER:-}" ]]; then
+    echo "$DAST_INVOKER_USER"
+    return 0
+  fi
+
   # Prefer the real human user behind sudo where possible.
   if [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
     echo "$SUDO_USER"
@@ -1314,16 +1320,23 @@ users__menu_audit() {
         local tmp
         tmp="$(mktemp_safe)" || continue
         {
-          echo "Current identity"
+          local inv
+          inv="$(users__current_user)"
+
+          echo "Invoking identity"
           echo "----------------------------------------"
           echo
-          echo "user: $(users__current_user)"
+          echo "user: $inv"
           echo
           echo "id:"
-          id 2>/dev/null || true
+          id "$inv" 2>/dev/null || true
           echo
           echo "groups:"
-          groups 2>/dev/null || true
+          id -nG "$inv" 2>/dev/null || true
+
+          echo
+          echo "Currently running as:"
+          echo "  $(id -un 2>/dev/null || true) (euid=$(id -u 2>/dev/null || true))"
         } >"$tmp"
         ui_textbox "$(users__crumb "Audit" "Whoami")" "$tmp"
         ;;
