@@ -134,6 +134,21 @@ if declare -F ui__normalise_menu_label >/dev/null 2>&1; then
     fi
   done
 
+
+  # Default EXIT label for view-only boxes (prevents theme default like EXIT)
+  # dialog uses EXIT label for textbox/tailbox/programbox/prgbox, not OK label.
+  local _has_exit_label=0 _is_viewbox=0
+  for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+      --exit-label|--exit-label=*) _has_exit_label=1 ;;
+      --textbox|--tailbox|--programbox|--progressbox|--prgbox) _is_viewbox=1 ;;
+    esac
+  done
+
+  if [[ $_is_viewbox -eq 1 && $_has_exit_label -eq 0 ]]; then
+    args=(--exit-label "Back" "${args[@]}")
+  fi
+
   # DaST-wide output:
   # To make output capture reliable across the project, we force --stdout unless the
   # caller already specified an output directive.

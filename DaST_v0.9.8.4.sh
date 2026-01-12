@@ -1374,6 +1374,49 @@ dial() {
   # - preserves dialog's exit code
   local args=("$@")
   local tmp errtmp rc out
+# Default label normalisation (prevents dialogrc/theme defaults like "Exit")
+# Policy:
+# - Menus/lists: Cancel -> Back
+# - View-only boxes: OK -> Back
+# - Msgbox: OK -> OK
+# - Input/Edit: OK -> OK, Cancel -> Cancel
+# - Yes/No: Yes -> Yes, No -> No
+local _has_ok_label=0 _has_cancel_label=0 _has_yes_label=0 _has_no_label=0 _has_exit_label=0 _has_defaultno=0
+local _is_menu=0 _is_viewbox=0 _is_msgbox=0 _is_input=0 _is_yesno=0
+local i
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[i]}" in
+    --ok-label|--ok-label=*) _has_ok_label=1 ;;
+    --cancel-label|--cancel-label=*) _has_cancel_label=1 ;;
+    --yes-label|--yes-label=*) _has_yes_label=1 ;;
+    --no-label|--no-label=*) _has_no_label=1 ;;
+    --exit-label|--exit-label=*) _has_exit_label=1 ;;
+    --defaultno) _has_defaultno=1 ;;
+    --menu|--radiolist|--checklist) _is_menu=1 ;;
+    --textbox|--tailbox|--programbox|--progressbox|--prgbox) _is_viewbox=1 ;;
+    --msgbox) _is_msgbox=1 ;;
+    --inputbox|--passwordbox|--passwordform|--editbox|--form) _is_input=1 ;;
+    --yesno) _is_yesno=1 ;;
+  esac
+done
+
+if [[ $_is_menu -eq 1 && $_has_cancel_label -eq 0 ]]; then
+  args=(--cancel-label "Back" "${args[@]}")
+fi
+if [[ $_is_viewbox -eq 1 && $_has_exit_label -eq 0 ]]; then
+  args=(--exit-label "Back" "${args[@]}")
+elif [[ $_is_msgbox -eq 1 && $_has_ok_label -eq 0 ]]; then
+  args=(--ok-label "OK" "${args[@]}")
+elif [[ $_is_input -eq 1 ]]; then
+  [[ $_has_ok_label -eq 0 ]] && args=(--ok-label "OK" "${args[@]}")
+  [[ $_has_cancel_label -eq 0 ]] && args=(--cancel-label "Cancel" "${args[@]}")
+fi
+if [[ $_is_yesno -eq 1 ]]; then
+  [[ $_has_defaultno -eq 0 ]] && args=(--defaultno "${args[@]}")
+  [[ $_has_yes_label -eq 0 ]] && args=(--yes-label "Yes" "${args[@]}")
+  [[ $_has_no_label -eq 0 ]] && args=(--no-label "No" "${args[@]}")
+fi
+
 
 # Stable per-run capture files (avoid mktemp churn + leftover files).
 tmp="${DAST_DLG_OUT:-${DAST_RUNTIME_DIR:-/tmp}/dast.dlg.out}"
@@ -1433,7 +1476,7 @@ ui_msg() {
     msg="$(ui_strip_emoji_prefix "$msg")"
   fi
 
-  dial --title "$title" --msgbox "$msg" "$UI_MSG_H" "$UI_MSG_W" >/dev/null || true
+  dial --title "$title" --ok-label "OK" --msgbox "$msg" "$UI_MSG_H" "$UI_MSG_W" >/dev/null || true
 }
 
 ui_msg_sized() {
@@ -1460,25 +1503,23 @@ ui_msg_sized() {
   (( h < 6 )) && h=6
   (( w < 20 )) && w=20
 
-  dial --title "$title" --msgbox "$msg" "$h" "$w" >/dev/null || true
+  dial --title "$title" --ok-label "OK" --msgbox "$msg" "$h" "$w" >/dev/null || true
 }
 
 ui_yesno() {
   ui_refresh_prefs
   local title="$1" msg="$2"
-  local default_no="${3:-0}"
+  local _compat_unused="${3:-}"
 
   if [[ "${UI_EMOJI:-1}" -eq 0 ]]; then
     title="$(ui_strip_emoji_prefix "$title")"
     msg="$(ui_strip_emoji_prefix "$msg")"
   fi
 
-  if [[ "$default_no" == "1" ]]; then
-    dial --title "$title" --defaultno --yesno "$msg" "$UI_MSG_H" "$UI_MSG_W" >/dev/null
-  else
-    dial --title "$title" --yesno "$msg" "$UI_MSG_H" "$UI_MSG_W" >/dev/null
-  fi
+  # Safety policy: ALWAYS default to NO to prevent accidental destructive actions.
+  dial --title "$title" --defaultno --yesno "$msg" "$UI_MSG_H" "$UI_MSG_W" >/dev/null
 }
+
 
 ui_input() {
   ui_refresh_prefs
@@ -1539,17 +1580,13 @@ ui_main_menu() {
 ui_textbox() {
   ui_refresh_prefs
   local title="$1" file="$2"
-  local ok_label="${3:-}"
+  local ok_label="${3:-Back}"
 
   if [[ "${UI_EMOJI:-1}" -eq 0 ]]; then
     title="$(ui_strip_emoji_prefix "$title")"
   fi
 
-  if [[ -n "$ok_label" ]]; then
-    dial --title "$title" --ok-label "$ok_label" --textbox "$file" "$UI_TBOX_H" "$UI_TBOX_W" >/dev/null || true
-  else
-    dial --title "$title" --textbox "$file" "$UI_TBOX_H" "$UI_TBOX_W" >/dev/null || true
-  fi
+  dial --title "$title" --exit-label "Back" --textbox "$file" "$UI_TBOX_H" "$UI_TBOX_W" >/dev/null || true
 }
 
 ui_programbox() {

@@ -118,7 +118,7 @@ fi
 if ! declare -F ui_textbox >/dev/null 2>&1; then
   ui_textbox() {
     local title="$1" file="$2"
-    dial --clear --title "$title" --textbox "$file" 22 92 >/dev/tty
+    dial --clear --title "$title" --exit-label "Back" --textbox "$file" 22 92 >/dev/tty
   }
 fi
 

@@ -122,7 +122,24 @@ if ! declare -F ui_inputbox >/dev/null 2>&1; then
 fi
 
 if ! declare -F ui_textbox >/dev/null 2>&1; then
-  ui_textbox() { ui_msgbox "$1" "Textbox not available.\n\nFile:\n$2"; }
+  ui_textbox() {
+    local _title="$1"
+    local _file="$2"
+    local _msg="Textbox not available.\n\nFile:\n${_file}"
+
+    # Labels-only: prevent dialog theme defaults (often "EXIT") leaking into view-only screens.
+    if declare -F dast_ui_dialog >/dev/null 2>&1; then
+      dast_ui_dialog --title "${_title}" --ok-label "Back" --msgbox "${_msg}" 12 70
+      return $?
+    fi
+    if command -v dialog >/dev/null 2>&1; then
+      dialog --title "${_title}" --ok-label "Back" --msgbox "${_msg}" 12 70
+      return $?
+    fi
+    # Last-resort fallback.
+    printf '%s\n' "${_title}" "${_msg}" >&2
+    return 1
+  }
 fi
 
 # Optional helpers used here; if absent, we fall back to dialog directly.
@@ -187,7 +204,7 @@ users__s1list() {
 
   # Last resort: raw dialog menu (scrollable/selectable).
   local dlg="${DAST_DIALOG_BIN:-${DIALOG_BIN:-${DIALOG:-dialog}}}"
-  sel="$("$dlg"--title "$title"--menu "$prompt" 20 80 14 "$@" 2>&1 >/dev/tty)"
+  sel="$( "$dlg" --title "$title" --menu "$prompt" 20 80 14 "$@" 2>&1 >/dev/tty)"
   rc=$?
   if [[ $rc -eq 0 && -n "${sel:-}" ]]; then
     printf '%s' "$sel"

@@ -278,7 +278,7 @@ monrep_report_options_menu() {
 
   local res=""
   if have dialog; then
-    res="$(dast_ui_dialog --title "$MONREP_TITLE"--checklist "Report options (affects Preview + Export)\n\nSPACE toggles. ENTER saves." 22 78 12 \
+    res="$(dast_ui_dialog --title "$MONREP_TITLE" --checklist "Report options (affects Preview + Export)\n\nSPACE toggles. ENTER saves." 22 78 12 \
       "DISK"    "Disk usage + block devices + mounts"        "$([[ "$MONREP_OPT_DISK" == "1" ]] && echo on || echo off)" \
       "NETWORK" "Network summary + listening ports"          "$([[ "$MONREP_OPT_NETWORK" == "1" ]] && echo on || echo off)" \
       "PROCS"   "Top processes snapshot"                     "$([[ "$MONREP_OPT_PROCS" == "1" ]] && echo on || echo off)" \
@@ -868,7 +868,7 @@ monrep_set_report_dir() {
     tmp="$(mktemp_safe)" || return 0
     printf '%s
 ' "$current" >"$tmp" 2>/dev/null || true
-    newdir="$(dast_ui_dialog --title "$MONREP_TITLE"--inputbox "Report export directory:\n\nDefault: /var/log/dast/reports\nFallback: /tmp/dast-reports\n\nCurrent:" 14 70 "$current" 3>&1 1>&2 2>&3)" || return 0
+    newdir="$(dast_ui_dialog --title "$MONREP_TITLE" --inputbox "Report export directory:\n\nDefault: /var/log/dast/reports\nFallback: /tmp/dast-reports\n\nCurrent:" 14 70 "$current" 3>&1 1>&2 2>&3)" || return 0
   else
     printf '
 Report export directory (default /var/log/dast/reports)
