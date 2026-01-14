@@ -123,12 +123,16 @@ if ! declare -F ui_textbox >/dev/null 2>&1; then
     local _msg="Textbox not available.\n\nFile:\n${_file}"
 
     # Labels-only: prevent dialog theme defaults (often "EXIT") leaking into view-only screens.
+    if declare -F dial >/dev/null 2>&1; then
+      dial --title "${_title}" --msgbox "${_msg}" 12 70
+      return $?
+    fi
     if declare -F dast_ui_dialog >/dev/null 2>&1; then
-      dast_ui_dialog --title "${_title}" --ok-label "Back" --msgbox "${_msg}" 12 70
+      dast_ui_dialog --title "${_title}" --ok-label "OK" --msgbox "${_msg}" 12 70
       return $?
     fi
     if command -v dialog >/dev/null 2>&1; then
-      dialog --title "${_title}" --ok-label "Back" --msgbox "${_msg}" 12 70
+      dialog --title "${_title}" --ok-label "OK" --msgbox "${_msg}" 12 70
       return $?
     fi
     # Last-resort fallback.

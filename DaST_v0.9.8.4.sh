@@ -385,25 +385,60 @@ printf '%s
 ' "info [CORE] loader: start (uid=$(id -u 2>/dev/null || echo ?), euid=$(id -u 2>/dev/null || echo ?), run_id=${DAST_RUN_ID})" >>"$DAST_CORE_LOG_FILE" 2>/dev/null || true
 
 # Runtime dir safety: must be private to the invoker to avoid symlink tricks and make debugging easy.
+_dast_runtime_fallback() {
+  local why="${1:-unspecified}"
+  local old="$DAST_RUNTIME_DIR"
+  local uid="${DAST_INVOKER_UID:-$(id -u 2>/dev/null || echo 0)}"
+  local runid="${DAST_RUN_ID:-$$}"
+  local new=""
+
+  if command -v mktemp >/dev/null 2>&1; then
+    new="$(mktemp -d "/tmp/dast.${uid}.${runid}.XXXXXX" 2>/dev/null || true)"
+  fi
+  if [[ -z "$new" ]]; then
+    new="/tmp/dast.${uid}.${runid}"
+    mkdir -p "$new" 2>/dev/null || true
+  fi
+
+  chmod 700 "$new" 2>/dev/null || true
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown "${DAST_INVOKER_USER:-root}:${DAST_INVOKER_GROUP:-root}" "$new" 2>/dev/null || true
+  fi
+
+  DAST_RUNTIME_DIR="$new"
+  export DAST_RUNTIME_DIR
+  echo "DaST: runtime dir fallback in use: $DAST_RUNTIME_DIR (was: $old; reason: $why)" >&2
+}
+
 if [[ -L "$DAST_RUNTIME_DIR" ]]; then
-  echo "DaST: runtime dir is a symlink (refusing): $DAST_RUNTIME_DIR" >&2
-  exit 1
+  echo "DaST: runtime dir is a symlink (fallback): $DAST_RUNTIME_DIR" >&2
+  _dast_runtime_fallback "symlink"
 fi
+
 chmod 700 "$DAST_RUNTIME_DIR" >/dev/null 2>&1 || true
-# If we're already root (or later, after sudo re-exec), ensure invoker owns the runtime dir and its artefacts.
+# If we are already root (or later, after sudo re-exec), ensure invoker owns the runtime dir and its artefacts.
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   chown "${DAST_INVOKER_USER}:${DAST_INVOKER_GROUP}" "$DAST_RUNTIME_DIR" >/dev/null 2>&1 || true
 fi
-# Refuse group/world writable runtime dir (security).
+
+# Refuse group/world writable runtime dir (security). Never hard-exit: fallback and continue.
 if command -v stat >/dev/null 2>&1; then
   _dast_rt_mode="$(stat -c %a "$DAST_RUNTIME_DIR" 2>/dev/null || echo "")"
   if [[ -n "$_dast_rt_mode" ]]; then
-    # last digit is "other" perms, middle is "group"
     _dast_rt_other="${_dast_rt_mode: -1}"
     _dast_rt_group="${_dast_rt_mode: -2:1}"
     if [[ "$_dast_rt_group" != "0" || "$_dast_rt_other" != "0" ]]; then
-      echo "DaST: runtime dir permissions must be 700 (got ${_dast_rt_mode}): $DAST_RUNTIME_DIR" >&2
-      exit 1
+      echo "DaST: runtime dir permissions not 700 (got ${_dast_rt_mode}), using fallback: $DAST_RUNTIME_DIR" >&2
+      _dast_runtime_fallback "perms ${_dast_rt_mode}"
+      chmod 700 "$DAST_RUNTIME_DIR" >/dev/null 2>&1 || true
+      _dast_rt_mode="$(stat -c %a "$DAST_RUNTIME_DIR" 2>/dev/null || echo "")"
+      if [[ -n "$_dast_rt_mode" ]]; then
+        _dast_rt_other="${_dast_rt_mode: -1}"
+        _dast_rt_group="${_dast_rt_mode: -2:1}"
+        if [[ "$_dast_rt_group" != "0" || "$_dast_rt_other" != "0" ]]; then
+          echo "DaST: warning: runtime dir still not private (got ${_dast_rt_mode}): $DAST_RUNTIME_DIR" >&2
+        fi
+      fi
     fi
   fi
   unset _dast_rt_mode _dast_rt_other _dast_rt_group
@@ -1348,7 +1383,24 @@ ui_refresh_prefs() {
 
   ui_apply_runtime_emoji_policy
 
-  # Apply compact sizing presets (used by wrappers below)
+  # Apply sizing presets, then clamp to the current terminal.
+  # Goal:
+  # - autosize to the user's TTY
+  # - avoid dialog errors on small terminals
+  # - reduce "squashed text" by using as much width as is safely available
+  local term_h term_w max_h max_w desired_w
+
+  term_h="$(tput lines 2>/dev/null || echo 24)"
+  term_w="$(tput cols  2>/dev/null || echo 80)"
+  [[ "$term_h" =~ ^[0-9]+$ ]] || term_h=24
+  [[ "$term_w" =~ ^[0-9]+$ ]] || term_w=80
+
+  # Leave breathing room so borders and titles fit reliably.
+  max_h=$(( term_h - 4 ))
+  max_w=$(( term_w - 4 ))
+  (( max_h < 10 )) && max_h=10
+  (( max_w < 40 )) && max_w=40
+
   if [[ "${UI_COMPACT}" -eq 1 ]]; then
     UI_MSG_H=10;  UI_MSG_W=70
     UI_IN_H=10;   UI_IN_W=70
@@ -1357,9 +1409,42 @@ ui_refresh_prefs() {
   else
     UI_MSG_H=12;  UI_MSG_W=80
     UI_IN_H=12;   UI_IN_W=80
-    UI_MENU_H=23; UI_MENU_W=80; UI_MENU_LIST=16
-    UI_TBOX_H=22; UI_TBOX_W=90
+    UI_MENU_H=23; UI_MENU_W=90; UI_MENU_LIST=16
+    UI_TBOX_H=22; UI_TBOX_W=100
   fi
+
+  # Prefer using most of the available width (up to a sensible cap),
+  # then clamp everything to the current terminal.
+  if [[ "${UI_COMPACT}" -eq 1 ]]; then
+    desired_w=$(( term_w * 85 / 100 ))
+    (( desired_w > 92 )) && desired_w=92
+    (( desired_w < 60 )) && desired_w=60
+  else
+    desired_w=$(( term_w * 90 / 100 ))
+    (( desired_w > 110 )) && desired_w=110
+    (( desired_w < 70 )) && desired_w=70
+  fi
+
+  (( UI_MSG_W < desired_w )) && UI_MSG_W=$desired_w
+  (( UI_IN_W  < desired_w )) && UI_IN_W=$desired_w
+  (( UI_MENU_W < desired_w )) && UI_MENU_W=$desired_w
+  (( UI_TBOX_W < desired_w )) && UI_TBOX_W=$desired_w
+
+  (( UI_MSG_H  > max_h )) && UI_MSG_H=$max_h
+  (( UI_IN_H   > max_h )) && UI_IN_H=$max_h
+  (( UI_MENU_H > max_h )) && UI_MENU_H=$max_h
+  (( UI_TBOX_H > max_h )) && UI_TBOX_H=$max_h
+
+  (( UI_MSG_W  > max_w )) && UI_MSG_W=$max_w
+  (( UI_IN_W   > max_w )) && UI_IN_W=$max_w
+  (( UI_MENU_W > max_w )) && UI_MENU_W=$max_w
+  (( UI_TBOX_W > max_w )) && UI_TBOX_W=$max_w
+
+  # Menus need a sensible list height.
+  UI_MENU_LIST=$(( UI_MENU_H - 8 ))
+  (( UI_MENU_LIST < 6 )) && UI_MENU_LIST=6
+  (( UI_MENU_LIST > UI_MENU_H - 4 )) && UI_MENU_LIST=$(( UI_MENU_H - 4 ))
+  return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -1416,6 +1501,63 @@ if [[ $_is_yesno -eq 1 ]]; then
   [[ $_has_yes_label -eq 0 ]] && args=(--yes-label "Yes" "${args[@]}")
   [[ $_has_no_label -eq 0 ]] && args=(--no-label "No" "${args[@]}")
 fi
+
+
+  # Clamp common dialog dimensions to the current terminal size.
+  # This avoids "dialog: expected ... got ..." and prevents tiny terminals from exploding.
+  local term_h term_w max_h max_w _mode _mi _h _w _lh
+  term_h="$(tput lines 2>/dev/null || echo 24)"
+  term_w="$(tput cols  2>/dev/null || echo 80)"
+  [[ "$term_h" =~ ^[0-9]+$ ]] || term_h=24
+  [[ "$term_w" =~ ^[0-9]+$ ]] || term_w=80
+  max_h=$(( term_h - 4 )); max_w=$(( term_w - 4 ))
+  (( max_h < 10 )) && max_h=10
+  (( max_w < 40 )) && max_w=40
+
+  _mode=""; _mi=-1
+  for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+      --msgbox|--yesno|--inputbox|--passwordbox|--passwordform|--editbox|--form|--textbox|--tailbox|--programbox|--progressbox|--prgbox|--menu|--radiolist|--checklist)
+        _mode="${args[i]}"; _mi=$i; break
+        ;;
+    esac
+  done
+
+  case "$_mode" in
+    --msgbox|--yesno)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"
+      ;;
+    --inputbox|--passwordbox|--passwordform|--editbox|--form)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"
+      ;;
+    --textbox|--tailbox|--programbox|--progressbox|--prgbox)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"
+      ;;
+    --menu|--radiolist|--checklist)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"; _lh="${args[_mi+4]}"
+      ;;
+  esac
+
+  if [[ "${_h:-}" =~ ^[0-9]+$ && "${_w:-}" =~ ^[0-9]+$ ]]; then
+    (( _h > 0 && _h > max_h )) && _h=$max_h
+    (( _w > 0 && _w > max_w )) && _w=$max_w
+
+    case "$_mode" in
+      --msgbox|--yesno|--inputbox|--passwordbox|--passwordform|--editbox|--form|--textbox|--tailbox|--programbox|--progressbox|--prgbox)
+        args[_mi+2]="${_h}"
+        args[_mi+3]="${_w}"
+        ;;
+      --menu|--radiolist|--checklist)
+        if [[ "${_lh:-}" =~ ^[0-9]+$ ]]; then
+          (( _lh > _h - 8 )) && _lh=$(( _h - 8 ))
+          (( _lh < 6 )) && _lh=6
+          args[_mi+4]="${_lh}"
+        fi
+        args[_mi+2]="${_h}"
+        args[_mi+3]="${_w}"
+        ;;
+    esac
+  fi
 
 
 # Stable per-run capture files (avoid mktemp churn + leftover files).

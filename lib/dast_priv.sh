@@ -99,7 +99,7 @@ dast_priv_ensure_root() {
   # In debug-gen mode: avoid dialog prompts (keeps output capture predictable)
   if [[ "${DAST_DEBUGGEN:-0}" -eq 1 ]]; then
     printf "DaST: sudo required. Type your sudo password now (input hidden), then press Enter.\n" >/dev/tty 2>/dev/null || true
-    if ! sudo -p "" -v </dev/tty >/dev/tty 2>/dev/tty; then
+    if ! sudo -p "" -v; then
       printf "DaST: sudo authentication failed.\n" >/dev/tty 2>/dev/null || true
       exit 1
     fi
@@ -114,12 +114,34 @@ dast_priv_ensure_root() {
 
   _dast_priv__apply_auth_theme
 
+  # Autosize auth dialogs to the current terminal (avoid squashed text and small TTY errors).
+  local _term_h _term_w _max_h _max_w _pw_h _pw_w _mb_h _mb_w
+  _term_h="$(tput lines 2>/dev/null || echo 24)"
+  _term_w="$(tput cols  2>/dev/null || echo 80)"
+  [[ "$_term_h" =~ ^[0-9]+$ ]] || _term_h=24
+  [[ "$_term_w" =~ ^[0-9]+$ ]] || _term_w=80
+  _max_h=$(( _term_h - 4 ))
+  _max_w=$(( _term_w - 4 ))
+  (( _max_h < 10 )) && _max_h=10
+  (( _max_w < 40 )) && _max_w=40
+
+  _pw_h=10; _pw_w=60
+  (( _pw_h > _max_h )) && _pw_h=_max_h
+  (( _pw_w > _max_w )) && _pw_w=_max_w
+  (( _pw_w < 40 )) && _pw_w=40
+  (( _pw_w > _max_w )) && _pw_w=_max_w
+
+  _mb_h=8; _mb_w=60
+  (( _mb_h > _max_h )) && _mb_h=_max_h
+  (( _mb_w > _max_w )) && _mb_w=_max_w
+  (( _mb_w < 40 )) && _mb_w=40
+
   local attempt pass rc left
   for attempt in 1 2 3; do
     # Force sudo to require a real password each attempt (prevents cached timestamp confusion).
     sudo -k >/dev/null 2>&1 || true
 
-    pass="$(DIALOGRC="$DIALOGRC" dialog --insecure --stdout --passwordbox "DaST requires root. Enter sudo password:" 10 60 </dev/tty 2>/dev/tty)"
+    pass="$(DIALOGRC="$DIALOGRC" dialog --insecure --stdout --passwordbox "DaST requires root. Enter sudo password:" "$_pw_h" "$_pw_w" </dev/tty 2>/dev/tty)"
     rc=$?
     clear || true
 
@@ -141,7 +163,7 @@ dast_priv_ensure_root() {
       if [[ "${UI_EMOJI:-1}" -eq 0 ]] && declare -F ui_strip_known_icons_anywhere >/dev/null 2>&1; then
         msg="$(ui_strip_known_icons_anywhere "$msg")"
       fi
-      DIALOGRC="$DIALOGRC" dialog --stdout --msgbox "$msg" 7 50 </dev/tty 2>/dev/tty || true
+      DIALOGRC="$DIALOGRC" dialog --stdout --msgbox "$msg" "$_mb_h" "$_mb_w" </dev/tty 2>/dev/tty || true
       clear || true
     else
       _dast_priv__apply_auth_theme
@@ -149,7 +171,7 @@ dast_priv_ensure_root() {
       if [[ "${UI_EMOJI:-1}" -eq 0 ]] && declare -F ui_strip_known_icons_anywhere >/dev/null 2>&1; then
         msg="$(ui_strip_known_icons_anywhere "$msg")"
       fi
-      DIALOGRC="$DIALOGRC" dialog --stdout --msgbox "$msg" 7 50 </dev/tty 2>/dev/tty || true
+      DIALOGRC="$DIALOGRC" dialog --stdout --msgbox "$msg" "$_mb_h" "$_mb_w" </dev/tty 2>/dev/tty || true
       clear || true
       exit 1
     fi

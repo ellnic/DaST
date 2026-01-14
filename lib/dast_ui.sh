@@ -149,6 +149,77 @@ if declare -F ui__normalise_menu_label >/dev/null 2>&1; then
     args=(--exit-label "Back" "${args[@]}")
   fi
 
+  # Safety policy: ALWAYS default to NO for yes/no prompts, even if the caller forgot.
+  local _is_yesno=0 _has_defaultno=0 _has_yes_label=0 _has_no_label=0
+  for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+      --yesno) _is_yesno=1 ;;
+      --defaultno) _has_defaultno=1 ;;
+      --yes-label|--yes-label=*) _has_yes_label=1 ;;
+      --no-label|--no-label=*) _has_no_label=1 ;;
+    esac
+  done
+  if [[ $_is_yesno -eq 1 ]]; then
+    [[ $_has_defaultno -eq 0 ]] && args=(--defaultno "${args[@]}")
+    [[ $_has_yes_label -eq 0 ]] && args=(--yes-label "Yes" "${args[@]}")
+    [[ $_has_no_label -eq 0 ]] && args=(--no-label "No" "${args[@]}")
+  fi
+
+  # Clamp common dialog dimensions to the current terminal size.
+  local term_h term_w max_h max_w _mode _mi _h _w _lh
+  term_h="$(tput lines 2>/dev/null || echo 24)"
+  term_w="$(tput cols  2>/dev/null || echo 80)"
+  [[ "$term_h" =~ ^[0-9]+$ ]] || term_h=24
+  [[ "$term_w" =~ ^[0-9]+$ ]] || term_w=80
+  max_h=$(( term_h - 4 )); max_w=$(( term_w - 4 ))
+  (( max_h < 10 )) && max_h=10
+  (( max_w < 40 )) && max_w=40
+
+  _mode=""; _mi=-1
+  for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+      --msgbox|--yesno|--inputbox|--passwordbox|--passwordform|--editbox|--form|--textbox|--tailbox|--programbox|--progressbox|--prgbox|--menu|--radiolist|--checklist)
+        _mode="${args[i]}"; _mi=$i; break
+        ;;
+    esac
+  done
+
+  case "$_mode" in
+    --msgbox|--yesno)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"
+      ;;
+    --inputbox|--passwordbox|--passwordform|--editbox|--form)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"
+      ;;
+    --textbox|--tailbox|--programbox|--progressbox|--prgbox)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"
+      ;;
+    --menu|--radiolist|--checklist)
+      _h="${args[_mi+2]}"; _w="${args[_mi+3]}"; _lh="${args[_mi+4]}"
+      ;;
+  esac
+
+  if [[ "${_h:-}" =~ ^[0-9]+$ && "${_w:-}" =~ ^[0-9]+$ ]]; then
+    (( _h > 0 && _h > max_h )) && _h=$max_h
+    (( _w > 0 && _w > max_w )) && _w=$max_w
+
+    case "$_mode" in
+      --msgbox|--yesno|--inputbox|--passwordbox|--passwordform|--editbox|--form|--textbox|--tailbox|--programbox|--progressbox|--prgbox)
+        args[_mi+2]="${_h}"
+        args[_mi+3]="${_w}"
+        ;;
+      --menu|--radiolist|--checklist)
+        if [[ "${_lh:-}" =~ ^[0-9]+$ ]]; then
+          (( _lh > _h - 8 )) && _lh=$(( _h - 8 ))
+          (( _lh < 6 )) && _lh=6
+          args[_mi+4]="${_lh}"
+        fi
+        args[_mi+2]="${_h}"
+        args[_mi+3]="${_w}"
+        ;;
+    esac
+  fi
+
   # DaST-wide output:
   # To make output capture reliable across the project, we force --stdout unless the
   # caller already specified an output directive.
