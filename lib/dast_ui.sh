@@ -31,7 +31,7 @@
 #   Minimal shared wrappers. Existing scripts can continue calling dialog directly.
 #
 
-dast_ui_clear() { clear || true; }
+dast_ui_clear() { [[ "${DAST_DEBUG:-0}" -eq 1 || "${DAST_DEBUGGEN:-0}" -eq 1 ]] || clear || true; }
 
 ui__strip_icon_prefix_for_menu_label() {
   # For menu/list labels only: remove known icon tokens and any leftover leading space.

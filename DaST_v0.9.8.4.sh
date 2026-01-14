@@ -103,6 +103,12 @@ _dast_tmp_cleanup() {
   _dast_tmpfiles=()
 }
 
+dast_exit() {
+  local rc="${1:-0}"
+  cleanup
+  exit "$rc"
+}
+
 _dast_on_exit() {
   # Keep the master "exit" breadcrumb even though we also do temp cleanup here.
   # (A later trap assignment would otherwise overwrite the earlier EXIT trap.)
@@ -298,6 +304,17 @@ fi
 # Debug flags
 DAST_DEBUG=0
 DAST_DEBUGGEN=0
+
+
+dast_should_clear_terminal() {
+  [[ "${DAST_DEBUG:-0}" -ne 1 && "${DAST_DEBUGGEN:-0}" -ne 1 ]]
+}
+
+dast_clear_terminal() {
+  dast_should_clear_terminal || return 0
+  clear || true
+}
+
 for _arg in "$@"; do
   [[ "${_arg}" == "--debug" ]] && DAST_DEBUG=1
   [[ "${_arg}" == "--debug-gen" || "${_arg}" == "--debuggen" ]] && DAST_DEBUGGEN=1
@@ -1008,10 +1025,13 @@ EOF
     dast_ui_dialog --clear --title "🚨 DaST folder permissions" --msgbox "$msg" 18 80
     rc=$?
     set -e
-    [[ $rc -eq 0 ]] || { [[ -n "${_dast_tmp_dialogrc:-}" ]] && rm -f "$_dast_tmp_dialogrc" 2>/dev/null || true; clear || true; return 1;
-    # Restore prior dialogrc env
-    if [[ -n "${__old_dialogrc:-}" ]]; then export DIALOGRC="$__old_dialogrc"; else unset DIALOGRC 2>/dev/null || true; fi
- } #
+    if [[ $rc -ne 0 ]]; then
+      [[ -n "${_dast_tmp_dialogrc:-}" ]] && rm -f "${_dast_tmp_dialogrc}" 2>/dev/null || true
+      # Restore prior dialogrc env
+      if [[ -n "${__old_dialogrc:-}" ]]; then export DIALOGRC="$__old_dialogrc"; else unset DIALOGRC 2>/dev/null || true; fi
+      dast_clear_terminal
+      return 1
+    fi
     # 3-way choice
     set +e
     choice="$(
@@ -1025,7 +1045,10 @@ EOF
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
-      clear
+      [[ -n "${_dast_tmp_dialogrc:-}" ]] && rm -f "${_dast_tmp_dialogrc}" 2>/dev/null || true
+      # Restore prior dialogrc env
+      if [[ -n "${__old_dialogrc:-}" ]]; then export DIALOGRC="$__old_dialogrc"; else unset DIALOGRC 2>/dev/null || true; fi
+      dast_clear_terminal
       exit 1
     fi
   else
@@ -1049,7 +1072,10 @@ EOF
       return 0
       ;;
     exit)
-      clear || true
+      [[ -n "${_dast_tmp_dialogrc:-}" ]] && rm -f "${_dast_tmp_dialogrc}" 2>/dev/null || true
+      # Restore prior dialogrc env
+      if [[ -n "${__old_dialogrc:-}" ]]; then export DIALOGRC="$__old_dialogrc"; else unset DIALOGRC 2>/dev/null || true; fi
+      dast_clear_terminal
       exit 1
       ;;
     fix)
@@ -1215,7 +1241,10 @@ mkdir -p "$CFG_DIR"
 # Helpers
 # -----------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
-cleanup() { [[ -n "${DAST_TMP_DIALOGRC:-}" ]] && rm -f "$DAST_TMP_DIALOGRC" >/dev/null 2>&1 || true; clear || true; }
+cleanup() {
+  [[ -n "${DAST_TMP_DIALOGRC:-}" ]] && rm -f "$DAST_TMP_DIALOGRC" >/dev/null 2>&1 || true
+  dast_clear_terminal
+}
 
 # -----------------------------------------------------------------------------
 # Module dependency helpers (optional)
