@@ -65,50 +65,231 @@ apt_is_valid_apt_system() {
 }
 
 # -----------------------------------------------------------------------------
-# Logging
+# Conffile (dpkg) policy
 # -----------------------------------------------------------------------------
-APT_LOG_DIR="${LOG_DIR:-}"
-APT_LOG_FILE=""
+# Conffile policy.
+APT_CONF_POLICY="keep"   # keep|new|ask
+APT_CONF_POLICY_SET=0     # 1 if user chose a policy this run
 
-apt_log_init() {
-  # Prefer DaST main's LOG_DIR; otherwise derive app root from this module path.
-  local target_dir="${APT_LOG_DIR}"
+apt__dpkg_conf_opts() {
+  # apt-get options for current conffile policy.
+  # keep: keep existing, new: use package version, ask: interactive
+  case "${APT_CONF_POLICY:-keep}" in
+    keep)
+      echo "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+      ;;
+    new)
+      echo "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confnew"
+      ;;
+    ask|*)
+      # For ASK, return nothing here (interactive runner handles it).
+      echo ""
+      ;;
+  esac
+  return 0
+}
 
-  if [[ -z "$target_dir" ]]; then
-    local mod_dir app_dir
-    mod_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-    app_dir="$(cd -- "$mod_dir/.." && pwd -P)"
-    target_dir="${app_dir}/logs"
+apt__conffile_policy_label() {
+  case "${APT_CONF_POLICY:-keep}" in
+    keep) echo "Keep existing" ;;
+    new)  echo "Replace with package version" ;;
+    ask)  echo "Ask each time" ;;
+    *)    echo "Keep existing" ;;
+  esac
+  return 0
+}
+
+
+
+# -----------------------------------------------------------------------------
+# Conffile policy picker
+# -----------------------------------------------------------------------------
+
+apt__dialog_calc_dims() {
+  # Compute dialog height/width that "just fits" the rendered text.
+  # Prints: "<height> <width>".
+  local msg="$1"
+  local rendered line
+  local lines=0
+  local maxlen=0
+
+  rendered="$(printf '%b' "$msg")"
+  while IFS= read -r line; do
+    lines=$((lines + 1))
+    # strip any carriage returns just in case
+    line="${line%$'
+'}"
+    # bash ${#} counts bytes; good enough for our mostly-ASCII UI strings.
+    local len=${#line}
+    if (( len > maxlen )); then
+      maxlen=$len
+    fi
+  done <<< "$rendered"
+
+  # Add dialog chrome padding.
+  local w=$((maxlen + 10))
+  local h=$((lines + 8))
+
+  # Sensible caps/mins (keeps things usable on small terminals).
+  (( w < 44 )) && w=44
+  (( w > 76 )) && w=76
+  (( h < 10 )) && h=10
+  (( h > 24 )) && h=24
+
+  printf '%s %s' "$h" "$w"
+}
+
+apt__yesno_defaultno() {
+  # Default-NO yes/no helper with auto-sized dialog.
+  local title="$1"
+  local msg="$2"
+  local yes_label="${3:-Proceed}"
+  local no_label="${4:-Cancel}"
+
+  local dims h w
+  dims="$(apt__dialog_calc_dims "$msg")"
+  h="${dims%% *}"
+  w="${dims##* }"
+
+  if declare -F dial >/dev/null 2>&1; then
+    dial --title "$title" --defaultno --yes-label "$yes_label" --no-label "$no_label" --yesno "$msg" "$h" "$w"
+    return $?
   fi
 
-  # Create the log directory (no fallback).
-  if ! mkdir -p "$target_dir" 2>/dev/null; then
-    APT_LOG_FILE=""
-    return 1
+  if command -v dialog >/dev/null 2>&1; then
+    # Prefer dast_ui_dialog wrapper if available.
+    if declare -F dast_ui_dialog >/dev/null 2>&1; then
+      dast_ui_dialog --title "$title" --defaultno --yes-label "$yes_label" --no-label "$no_label" --yesno "$msg" "$h" "$w"
+    else
+      dialog --title "$title" --defaultno --yes-label "$yes_label" --no-label "$no_label" --yesno "$msg" "$h" "$w"
+    fi
+    return $?
   fi
 
-  # Repair permissions similarly to DaST config dir logic.
-  # If running via sudo, prefer the invoking user.
-  if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-    chown "$SUDO_USER":"$SUDO_USER" "$target_dir" 2>/dev/null || true
+  # No TUI available: be safe.
+  return 1
+}
+
+apt__radiolist_conffile_policy() {
+  # Radiolist for conffile handling. Returns tag: keep|new|ask
+  local title="⚙️ Conffile handling"
+  local msg="When packages ask about replacing config files:"
+
+  # Height/width: derived from the longest option text.
+  local maxlen=0
+  local s
+  for s in \
+    "Keep existing config (recommended)" \
+    "Replace with package version (overwrite existing)" \
+    "Ask each time (interactive)" \
+    "$msg"; do
+    (( ${#s} > maxlen )) && maxlen=${#s}
+  done
+  local w=$((maxlen + 14))
+  local h=15
+  (( w < 56 )) && w=56
+  (( w > 76 )) && w=76
+
+  if declare -F dial >/dev/null 2>&1; then
+    dial --title "$title" --radiolist "$msg" "$h" "$w" 3 \
+      keep "Keep existing config (recommended)" on \
+      new  "Replace with package version (overwrite existing)" off \
+      ask  "Ask each time (interactive)" off
+    return $?
+  fi
+
+  if command -v dialog >/dev/null 2>&1; then
+    # Prefer wrapper if present.
+    if declare -F dast_ui_dialog >/dev/null 2>&1; then
+      dast_ui_dialog --title "$title" --radiolist "$msg" "$h" "$w" 3 \
+        keep "Keep existing config (recommended)" on \
+        new  "Replace with package version (overwrite existing)" off \
+        ask  "Ask each time (interactive)" off
+    else
+      dialog --title "$title" --radiolist "$msg" "$h" "$w" 3 \
+        keep "Keep existing config (recommended)" on \
+        new  "Replace with package version (overwrite existing)" off \
+        ask  "Ask each time (interactive)" off
+    fi
+    return $?
+  fi
+
+  # No TUI.
+  return 1
+}
+
+apt__defaultno_yesno() {
+  local title="$1"
+  local msg="$2"
+  apt__yesno_defaultno "$title" "$msg" "Proceed" "Cancel"
+  return $?
+}
+
+apt_pick_conffile_policy() {
+  local sel
+
+  # Prefer radiolist (exact Keep/Replace/Ask UX). If we have dialog/dial, use it.
+  if declare -F dial >/dev/null 2>&1 || command -v dialog >/dev/null 2>&1; then
+    sel="$(apt__radiolist_conffile_policy)" || return 1
   else
-    chown "$(id -u)":"$(id -g)" "$target_dir" 2>/dev/null || true
+    sel="$(ui_menu "⚙️ Conffile policy" "When packages ask about replacing config files:"       "KEEP"   "Keep existing config (recommended)"       "NEW"    "Replace with package version (overwrite existing)"       "ASK"    "Ask each time (interactive TTY)"       "CANCEL" "Cancel")" || return 1
+    case "$sel" in
+      KEEP) sel=keep ;;
+      NEW)  sel=new  ;;
+      ASK)  sel=ask  ;;
+      *)    sel=""  ;;
+    esac
   fi
-  chmod 755 "$target_dir" 2>/dev/null || true
 
-  APT_LOG_DIR="$target_dir"
-  APT_LOG_FILE="${APT_LOG_DIR}/apt.log"
+  case "$sel" in
+    keep)
+      APT_CONF_POLICY="keep"
+      ;;
+    new)
+      if ! apt__defaultno_yesno "⚠️ Warning" "This can overwrite your existing config files.
 
-  touch "$APT_LOG_FILE" 2>/dev/null || true
-  chmod 644 "$APT_LOG_FILE" 2>/dev/null || true
+Proceed with 'Replace with package version'?"; then
+        return 1
+      fi
+      APT_CONF_POLICY="new"
+      ;;
+    ask)
+      if ! apt__defaultno_yesno "⚠️ Interactive mode" "This can ask configuration questions during install/upgrade.
+
+Stay at the keyboard.
+
+Proceed with 'Ask each time'?"; then
+        return 1
+      fi
+      APT_CONF_POLICY="ask"
+      ;;
+    "")
+      return 1
+      ;;
+    *)
+      apt_log "CONF_POLICY unexpected selection sel=$(printf '%q' "$sel")"
+      return 1
+      ;;
+  esac
+
+  APT_CONF_POLICY_SET=1
+  apt_log "CONF_POLICY selected policy=$APT_CONF_POLICY"
+  return 0
+}
+
+apt__ensure_conffile_policy() {
+  # Prompt once per run.
+  if [[ "${APT_CONF_POLICY_SET:-0}" -eq 0 ]]; then
+    apt_pick_conffile_policy || return 1
+  fi
+  return 0
 }
 
 
 # -----------------------------------------------------------------------------
 # Helper-aware runners
 # -----------------------------------------------------------------------------
-# Prefer shared lib/dast_helper.sh if present (run/run_capture).
-# Fall back to direct execution if this module is used standalone.
+# Prefer shared helper functions if provided; fall back to direct execution.
 apt__capture() {
   if declare -F run_capture >/dev/null 2>&1; then
     # run_capture expects argv. If we were given a single string, it may contain
@@ -159,9 +340,7 @@ have_dialog() {
 # -----------------------------------------------------------------------------
 # UI helpers (module-local)
 # -----------------------------------------------------------------------------
-# Some older DaST mains don't provide ui_inputbox; some modules previously called
-# _apt_ui_inputbox but forgot to define it. That can look like a "cancel" because
-# the call fails (exit 127). Define it here safely.
+# Compatibility shim for older mains lacking ui_inputbox().
 _apt_ui_inputbox() {
   local title="$1"
   local prompt="$2"
@@ -183,17 +362,9 @@ _apt_ui_inputbox() {
 }
 
 apt_log() {
-  apt_log_init || true
-  local msg="$*"
-
-  if declare -F dast_log >/dev/null 2>&1; then
-    dast_log "INFO" "$module_id" "${msg}"
-    return 0
-  fi
-
-  [[ -n "${APT_LOG_FILE:-}" ]] || return 0
-  printf '[%s] %s
-' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >>"$APT_LOG_FILE" 2>/dev/null || true
+  # Debug logging via DaST main (if available).
+  apt_dbg "$*"
+  return 0
 }
 
 apt_dbg() {
@@ -268,8 +439,6 @@ apt__make_script() {
   local tscript
   tscript="$(apt__mktemp_plain)"
 
-  apt_log_init
-
   cat >"$tscript" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -279,20 +448,13 @@ export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
 export TERM=dumb
 
-APT_LOG_FILE=${APT_LOG_FILE@Q}
-
-{
-  $cmd
-} 2>&1 | tee -a "\$APT_LOG_FILE"
-exit \${PIPESTATUS[0]}
+$cmd
 EOF
 
   chmod +x "$tscript"
 
   apt_log "MAKE_SCRIPT path=$tscript"
   apt_log "MAKE_SCRIPT cmd=$(printf '%q' "$cmd")"
-  apt_log "MAKE_SCRIPT log_file=$APT_LOG_FILE"
-
   echo "$tscript"
 }
 
@@ -315,33 +477,121 @@ apt_run_box() {
     _dast_run_append_log_line "[$(date '+%Y-%m-%d %H:%M:%S%z')] module=APT action=RUN_BOX title=$(printf '%q' "$title") cmd=$(printf '%q' "$cmd")"
   fi
 
+  local apt_rc=0
+
   if have_dialog; then
     local dlgbin
     dlgbin="$(command -v dialog || true)"
     apt_log "RUN_BOX invoking dialog progressbox via pipe"
-    # IMPORTANT: Do NOT pipe into dial() here. dial() binds stdin to /dev/tty, which
-    # breaks widgets like --progressbox that must read from stdin. Call dialog
-    # directly so it can consume the pipe and exit cleanly.
-    set +e
-    /bin/bash "$tscript" 2>&1 | "$dlgbin" --backtitle "$APP_TITLE" \
-      --title "$title" \
-      --no-cancel --no-collapse --cr-wrap \
-      --progressbox "Running..." 22 90 \
-      >/dev/tty 2>/dev/tty
-    local rc=$?
-    set -e
-    apt_log "RUN_BOX dialog_exit=$rc"
+    # Use dialog directly for --progressbox; dial() binds stdin to /dev/tty.
+    local fifo pid dlg_rc
+    fifo="$(apt__mktemp_plain).fifo"
+    rm -f "$fifo" 2>/dev/null || true
+    if ! mkfifo "$fifo" 2>/dev/null; then
+      apt_log "RUN_BOX mkfifo failed fifo=$fifo; falling back to plain output"
+      # Prefer dialog for user-facing warning; otherwise stderr.
+      if [[ -n "${dlgbin:-}" ]]; then
+        "$dlgbin" --backtitle "$APP_TITLE" \
+          --title "APT Output (fallback)" \
+          --msgbox "Could not create FIFO:\n$fifo\n\nFalling back to plain output." 10 70 \
+          >/dev/tty 2>/dev/tty
+      else
+        echo "WARN: Could not create FIFO: $fifo; falling back to plain output." >&2
+      fi
+
+      set +e
+      /bin/bash "$tscript"
+      apt_rc=$?
+      set -e
+
+      dlg_rc=0
+      rm -f "$fifo" 2>/dev/null || true
+      apt_log "RUN_BOX dialog_exit=$dlg_rc"
+      apt_log "RUN_BOX apt_exit=$apt_rc"
+    else
+
+      set +e
+      /bin/bash "$tscript" >"$fifo" 2>&1 &
+      pid=$!
+
+      "$dlgbin" --backtitle "$APP_TITLE" \
+        --title "$title" \
+        --no-cancel --no-collapse --cr-wrap \
+        --progressbox "Running..." 22 90 \
+        <"$fifo" \
+        >/dev/tty 2>/dev/tty
+      dlg_rc=$?
+
+      wait "$pid"
+      apt_rc=$?
+
+      rm -f "$fifo" 2>/dev/null || true
+      set -e
+
+      apt_log "RUN_BOX dialog_exit=$dlg_rc"
+      apt_log "RUN_BOX apt_exit=$apt_rc"
+    fi
   else
     apt_log "RUN_BOX dialog not found, running script directly"
-    /bin/bash "$tscript" || true
-    apt_log "RUN_BOX direct_exit=$?"
+    set +e
+    /bin/bash "$tscript"
+    apt_rc=$?
+    set -e
+    apt_log "RUN_BOX direct_exit=$apt_rc"
   fi
 
   rm -f "$tscript" 2>/dev/null || true
   trap - EXIT INT TERM
   apt_log "RUN_BOX done"
 
-  ui_msg "$title" "Complete.\n\nPress OK to return.\n\nLog file:\n$APT_LOG_FILE"
+  if [[ "$apt_rc" -ne 0 ]]; then
+    apt__failure_recovery "$apt_rc" "$title"
+  else
+    ui_msg "$title" "Complete.\n\nPress OK to return."
+  fi
+
+  return "$apt_rc"
+}
+apt_run_interactive() {
+  local title="$1"
+  local cmd="$2"
+
+  apt_log "RUN_INTERACTIVE title=$title uid=$(id -u) user=$(id -un 2>/dev/null || echo '?')"
+  apt_log "RUN_INTERACTIVE cmd=$(printf '%q' "$cmd")"
+
+  clear
+  echo "============================================================"
+  echo "DaST APT: Interactive run"
+  echo "============================================================"
+  echo
+  echo "Task: $title"
+  echo
+  echo "Command:"
+  echo "  $cmd"
+  echo
+  echo "Notes:"
+  echo "  - This run is interactive so dpkg can ask about config file changes."
+  echo "  - When finished, press Enter to return to DaST."
+  echo
+  echo "------------------------------------------------------------"
+  echo
+
+  local rc=0
+  bash -o pipefail -c "$cmd"
+  rc=$?
+
+  echo
+  echo "------------------------------------------------------------"
+  echo "Exit status: $rc"
+  echo
+  read -r -p "Press Enter to return to DaST..." </dev/tty || true
+  clear
+
+  if [[ "$rc" -ne 0 ]]; then
+    apt__failure_recovery "$rc" "$title"
+  fi
+
+  return "$rc"
 }
 
 apt_has_autoremove() {
@@ -362,14 +612,43 @@ apt_preview_box() {
   # Ensure temporary file is cleaned up even if the user aborts the textbox.
   trap 'rm -f "$tmp" 2>/dev/null || true' EXIT INT TERM
 
+  # Immediate feedback to avoid dead air while the preview is being built.
+  if command -v dialog >/dev/null 2>&1; then
+    local work_msg
+    work_msg=$'Building APT preview... please wait.
+Large update sets can take a little while.'
+
+    local errexit_was_set=0
+    [[ $- == *e* ]] && errexit_was_set=1
+    set +e
+    dast_ui_dialog --title "APT" --infobox "$work_msg" 6 70 >/dev/null 2>&1 || true
+    [[ $errexit_was_set -eq 1 ]] && set -e
+  fi
+
   {
     echo "Command:"
     echo "  $cmd"
     echo
     echo "Next: you will be shown what needs to be installed, and you can Cancel or Proceed (default is Cancel)."
     echo
-    apt__capture "$cmd" 2>&1 || true
   } >"$tmp"
+
+  local rc
+  local errexit_was_set=0
+  [[ $- == *e* ]] && errexit_was_set=1
+  set +e
+  apt__capture "$cmd" >>"$tmp" 2>&1
+  rc=$?
+  [[ $errexit_was_set -eq 1 ]] && set -e
+
+  if [[ $rc -ne 0 ]]; then
+    ui_msg "APT preview failed" "Unable to build APT preview (exit code: $rc).
+
+Try again, or run APT in a terminal for full output."
+    rm -f "$tmp" || true
+    trap - EXIT INT TERM
+    return 1
+  fi
 
   # Prefer dialog directly so we can set a friendlier button label.
   if command -v dialog >/dev/null 2>&1; then
@@ -390,6 +669,19 @@ apt_preview_box_argv() {
   # Ensure temporary file is cleaned up even if the user aborts the textbox.
   trap 'rm -f "$tmp" 2>/dev/null || true' EXIT INT TERM
 
+  # Immediate feedback to avoid dead air while the preview is being built.
+  if command -v dialog >/dev/null 2>&1; then
+    local work_msg
+    work_msg=$'Building APT preview... please wait.
+Large update sets can take a little while.'
+
+    local errexit_was_set=0
+    [[ $- == *e* ]] && errexit_was_set=1
+    set +e
+    dast_ui_dialog --title "APT" --infobox "$work_msg" 6 70 >/dev/null 2>&1 || true
+    [[ $errexit_was_set -eq 1 ]] && set -e
+  fi
+
   {
     echo "Command:"
     printf "  "
@@ -401,8 +693,24 @@ apt_preview_box_argv() {
     echo
     echo "Next: you will be shown what needs to be installed, and you can Cancel or Proceed (default is Cancel)."
     echo
-    apt__capture "$@" 2>&1 || true
   } >"$tmp"
+
+  local rc
+  local errexit_was_set=0
+  [[ $- == *e* ]] && errexit_was_set=1
+  set +e
+  apt__capture "$@" >>"$tmp" 2>&1
+  rc=$?
+  [[ $errexit_was_set -eq 1 ]] && set -e
+
+  if [[ $rc -ne 0 ]]; then
+    ui_msg "APT preview failed" "Unable to build APT preview (exit code: $rc).
+
+Try again, or run APT in a terminal for full output."
+    rm -f "$tmp" || true
+    trap - EXIT INT TERM
+    return 1
+  fi
 
   # Prefer dialog directly so we can set a friendlier button label.
   if command -v dialog >/dev/null 2>&1; then
@@ -414,32 +722,115 @@ apt_preview_box_argv() {
   trap - EXIT INT TERM
 }
 
+apt__confirm_interactive_gate() {
+  local msg
+  msg=$'This will run APT interactively in your terminal so dpkg can ask about configuration file changes.
+
+Stay at the keyboard.
+
+Proceed?'
+
+  apt__yesno_defaultno "Interactive mode" "$msg" "Proceed" "Cancel"
+  return $?
+}
+
+
 apt_confirm_run() {
   local title="$1"
   local prompt="$2"
   local cmd="$3"
+  shift 3
+
+  local show_policy_line=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-policy-line)
+        show_policy_line=0
+        ;;
+    esac
+    shift
+  done
+
+  if [[ $show_policy_line -eq 1 ]]; then
+    local policy_line="Conffile policy: $(apt__conffile_policy_label)"
+    prompt="${prompt}"$'\n\n'"${policy_line}"
+  fi
 
   # Safety: default to "No" so a preview doesn't lead to an accidental "Yes".
-  # Prefer dial() (from main) so we inherit the /dev/tty + set -e safe wrapper.
-  if declare -F dial >/dev/null 2>&1; then
-    if dial --title "Confirm" --defaultno --yes-label "Proceed" --no-label "Cancel" --yesno "$prompt" 12 78; then
+  if apt__yesno_defaultno "Confirm" "$prompt" "Proceed" "Cancel"; then
+    if [[ "${APT_CONF_POLICY:-keep}" == "ask" ]]; then
+      apt__confirm_interactive_gate || return 0
+      apt_run_interactive "$title" "$cmd"
+    else
       apt_run_box "$title" "$cmd"
     fi
-    return 0
   fi
 
-  # Fallback: raw dialog with defaultno.
-  if command -v dialog >/dev/null 2>&1; then
-    if dast_ui_dialog --title "Confirm" --defaultno --yes-label "Proceed" --no-label "Cancel" --yesno "$prompt" 12 78; then
-      apt_run_box "$title" "$cmd"
-    fi
-    return 0
-  fi
+  return 0
+}
 
-  # Last resort: whatever ui_yesno does.
-  if ui_yesno "Confirm" "$prompt"; then
-    apt_run_box "$title" "$cmd"
-  fi
+
+
+# -----------------------------------------------------------------------------
+# Failure handling
+# -----------------------------------------------------------------------------
+apt__confirm_default_no() {
+  # Confirm helper (default: Cancel/No).
+  local title="$1"
+  local prompt="$2"
+
+  apt__yesno_defaultno "$title" "$prompt" "Proceed" "Cancel"
+  return $?
+}
+
+
+apt__failure_recovery() {
+  # Recovery menu shown after an APT failure.
+  local exit_code="${1:-1}"
+  local context_title="${2:-APT}"
+
+  local msg
+  msg="APT exited with code: $exit_code\n\nConffile policy: $(apt__conffile_policy_label)\n\nChoose a recovery action:"
+
+  # First: clear error message.
+  ui_msg "APT failed" "$msg"
+
+  while true; do
+    local sel
+    sel="$(ui_menu "🧰 APT Recovery" "What would you like to do?" \
+      "DPKG_CONFIG" "1) Finish interrupted dpkg (dpkg --configure -a)" \
+      "FIX_BROKEN"  "2) Fix broken deps (apt-get -f install)" \
+      "BACK"        "3) Return to menu")" || return 0
+
+    apt_log "RECOVERY menu sel=${sel:-<empty>} exit_code=$exit_code context=$(printf '%q' "$context_title")"
+
+    case "$sel" in
+      DPKG_CONFIG)
+        if apt__confirm_default_no "Confirm" "Run:\n\ndpkg --configure -a\n\nConffile policy: $(apt__conffile_policy_label)\nProceed?"; then
+          apt_run_box "dpkg recovery" "dpkg --configure -a"
+        fi
+        ;;
+
+      FIX_BROKEN)
+        if apt__confirm_default_no "Confirm" "Run:\n\napt-get -y -f install\n\nConffile policy: $(apt__conffile_policy_label)\nProceed?"; then
+          if [[ "${APT_CONF_POLICY:-keep}" == "ask" ]]; then
+            # ASK policy must run interactive so dpkg can prompt.
+            apt__confirm_interactive_gate || continue
+            apt_run_interactive "Fix broken deps" "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y -f install"
+          else
+            apt_run_box "Fix broken deps" "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y -f $(apt__dpkg_conf_opts) install"
+          fi
+        fi
+        ;;
+      BACK)
+        return 0
+        ;;
+
+      *)
+        ui_msg "Error" "Unknown selection: $sel"
+        ;;
+    esac
+  done
 }
 
 
@@ -731,7 +1122,8 @@ apt_menu_upgrades() {
 apt-get update
 
 Proceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update" \
+          --no-policy-line
         ;;
 
       RECOMMENDED)
@@ -752,6 +1144,10 @@ Proceed?" \
 
         apt_preview_box "Preview: apt-get -s upgrade" \
           "apt-get -o Dpkg::Progress-Fancy=0 -s upgrade || true"
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
         apt_confirm_run "APT Update + Upgrade" \
           "Run:
 
@@ -759,7 +1155,7 @@ apt-get update
 apt-get -y upgrade
 
 Proceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y upgrade"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y $(apt__dpkg_conf_opts) upgrade"
         ;;
 
       UPGRADABLE)
@@ -790,6 +1186,10 @@ Proceed?" \
 
         apt_preview_box "Preview: apt-get -s upgrade" \
           "apt-get -o Dpkg::Progress-Fancy=0 -s upgrade || true"
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
         apt_confirm_run "APT Upgrade" \
           "Run:
 
@@ -797,7 +1197,7 @@ apt-get update
 apt-get -y upgrade
 
 Proceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y upgrade"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y $(apt__dpkg_conf_opts) upgrade"
         ;;
 
       DIST_UPGRADE)
@@ -813,6 +1213,10 @@ Proceed?" \
 
         apt_preview_box "Preview: apt-get -s dist-upgrade" \
           "apt-get -o Dpkg::Progress-Fancy=0 -s dist-upgrade || true"
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
         apt_confirm_run "APT Dist Upgrade" \
           "Run:
 
@@ -820,7 +1224,7 @@ apt-get update
 apt-get -y dist-upgrade
 
 Proceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y dist-upgrade"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y $(apt__dpkg_conf_opts) dist-upgrade"
         ;;
 
       FULL_UPGRADE)
@@ -836,6 +1240,10 @@ Proceed?" \
 
         apt_preview_box "Preview: apt-get -s full-upgrade" \
           "apt-get -o Dpkg::Progress-Fancy=0 -s full-upgrade || true"
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
         apt_confirm_run "APT Full Upgrade" \
           "Run:
 
@@ -843,7 +1251,7 @@ apt-get update
 apt-get -y full-upgrade
 
 Proceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y full-upgrade"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y $(apt__dpkg_conf_opts) full-upgrade"
         ;;
 
       BACK) return 0 ;;
@@ -865,9 +1273,13 @@ apt_menu_fix() {
 
     case "$sel" in
       FIX_BROKEN)
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
         apt_confirm_run "Fix broken deps" \
           "Run:\n\napt-get -y -f install\n\nProceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y -f install"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y -f $(apt__dpkg_conf_opts) install"
         ;;
       DPKG_CONFIG)
         apt_confirm_run "dpkg recovery" \
@@ -900,9 +1312,13 @@ apt_menu_clean() {
 
         apt_preview_box "Preview: apt-get -s autoremove" \
           "apt-get -o Dpkg::Progress-Fancy=0 -s autoremove || true"
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
         apt_confirm_run "APT Autoremove" \
           "Run:\n\napt-get update\napt-get -y autoremove\n\nProceed?" \
-          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y autoremove"
+          "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y $(apt__dpkg_conf_opts) autoremove"
         ;;
       AUTOCLEAN)
         apt_confirm_run "APT Autoclean" \
@@ -1002,7 +1418,16 @@ apt_menu_maintenance_custom() {
 
   apt_preview_box "Preview: maintenance (custom)" "$preview_cmd"
 
-  if ! ui_yesno "Confirm" "Run these maintenance steps?\n\n$(printf '%b' "$steps")\nProceed?"; then
+  if ! apt__ensure_conffile_policy; then
+    return 0
+  fi
+
+  if ! apt__confirm_default_no "Confirm" "Run these maintenance steps?
+
+$(printf '%b' "$steps")
+
+Conffile policy: $(apt__conffile_policy_label)
+Proceed?"; then
     return 0
   fi
 
@@ -1013,7 +1438,7 @@ apt_menu_maintenance_custom() {
     sep=" && "
   fi
   if [[ "$do_autoremove" -eq 1 ]]; then
-    run_cmd+="${sep}apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y autoremove"
+    run_cmd+="${sep}apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y $(apt__dpkg_conf_opts) autoremove"
     sep=" && "
   fi
   if [[ "$do_autoclean" -eq 1 ]]; then
@@ -1039,11 +1464,7 @@ apt_menu_maintenance_custom() {
 
 
 apt_menu_common_installs() {
-  # This menu is intentionally conservative:
-  # - It installs only a curated set of packages
-  # - It checks OS suitability and what's already installed
-  # - It defaults to "No" on confirms (via apt_confirm_run)
-  # - It requires root (installing packages as a normal user is a footgun)
+  # Curated installs with safe defaults (checks, root-only, default-NO).
 
   if [[ "$(id -u)" -ne 0 ]]; then
     ui_msg "$MODULESPEC_TITLE" "Common installs requires root.\n\nRe-run DaST with sudo:\n\n  sudo $0\n"
@@ -1159,10 +1580,13 @@ After the preview you can Cancel or Proceed (default is Cancel)."
 
   apt_preview_box "Install preview: $label" \
     "apt-get -s install --no-install-recommends $missing_q 2>&1 || true"
+  if ! apt__ensure_conffile_policy; then
+    return 0
+  fi
 
   apt_confirm_run "Install: $label" \
     "This will install the following packages:\n\n${missing[*]}\n\nDaST safety notes:\n- Uses distro APT repos (no vendor repos here)\n- Uses --no-install-recommends to keep it lean\n- Defaults to NO on confirmation\n\nProceed?" \
-    "apt-get update || true; echo; apt-get install -y --no-install-recommends $missing_q || true"
+    "apt-get update || true; echo; apt-get $(apt__dpkg_conf_opts) install -y --no-install-recommends $missing_q || true"
 }
 
 
@@ -1246,20 +1670,23 @@ After the preview you can Cancel or Proceed (default is Cancel)."
     "apt-get -s install --no-install-recommends $missing_q 2>&1 || true"
 
   # Confirm (default Cancel via apt_confirm_run behaviour)
+  if ! apt__ensure_conffile_policy; then
+    return 0
+  fi
+
   apt_confirm_run "Install: $label" \
     "This will install the following packages (already-installed selections will be skipped):\n\n${missing[*]}\n\nDefault is Cancel.\n\nProceed?" \
-    "apt-get update || true; echo; apt-get install -y --no-install-recommends $missing_q || true"
+    "apt-get update || true; echo; apt-get $(apt__dpkg_conf_opts) install -y --no-install-recommends $missing_q || true"
 }
 module_APT() {
   local MODULESPEC_TITLE="📦 APT (packages)"
-  apt_log_init
-  apt_log "APT module start uid=$(id -u) user=$(id -un 2>/dev/null || echo '?') log_file=$APT_LOG_FILE"
+  apt_log "APT module start uid=$(id -u) user=$(id -un 2>/dev/null || echo '?')"
 
   while true; do
     local sel
     sel="$(ui_menu "$MODULESPEC_TITLE" "Choose:" \
       "UPGRADES_MENU" "⬆️ Upgrades (update/upgrade/dist/full)" \
-      "MAINT"         "🧰 Maintenance bundle (update + autoremove + clean up + show history)" \
+      "MAINT"         "🧰 Maintenance bundle (update + cleanup)" \
       "MAINT_CUSTOM"  "🧰 Maintenance (custom checklist)" \
       "COMMON_INSTALLS" "🧩 Common installs (curated)" \
       "FIX_MENU"      "🩹 Fix / recovery (broken deps, dpkg)" \
@@ -1280,7 +1707,11 @@ module_APT() {
         apt_preview_box "Preview: maintenance bundle" \
           "echo '== apt-get -s autoremove =='; echo; apt-get -o Dpkg::Progress-Fancy=0 -s autoremove || true; echo; echo '---'; echo; echo '== apt-get -s autoclean =='; echo; apt-get -o Dpkg::Progress-Fancy=0 -s autoclean || true; echo; echo '---'; echo; echo '== apt-get clean =='; echo; echo '(clean has no simulation output)'"
 
-        if ui_yesno "Confirm" "Run maintenance bundle?\n\nThis will run:\n\n1) apt-get update\n2) apt-get -y autoremove\n3) apt-get -y autoclean\n4) apt-get clean\n\nThen it will show APT history logs.\n\nProceed?"; then
+        if ! apt__ensure_conffile_policy; then
+          continue
+        fi
+
+        if apt__confirm_default_no "Confirm" "Run maintenance bundle?\n\nThis will run:\n\n1) apt-get update\n2) apt-get -y autoremove\n3) apt-get -y autoclean\n4) apt-get clean\n\nConffile policy: $(apt__conffile_policy_label)\n\nThen it will show APT history logs.\n\nProceed?"; then
           apt_run_box "APT Maintenance bundle" \
             "apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 update && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y autoremove && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 -y autoclean && apt-get -o Dpkg::Progress-Fancy=0 -o APT::Colour=0 clean"
           apt_show_history
