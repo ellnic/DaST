@@ -3,7 +3,6 @@
 <p align="center">
   <img src="dast_tui.png" alt="DaST TUI" />
 </p>
-
 **Version:** v0.9.8.4 (alpha) NOTE: Some functions may be incomplete or have errors. This is WIP.
 
 
@@ -127,7 +126,7 @@ If a module is not applicable to the current system, it will not register and wi
 
 DaST does not attempt to force unsupported tooling onto a system.
 
-### Supported / gated modules
+### Gated modules
 
 | Module   | Requirements | Will load on | Will NOT load on |
 |----------|-------------|--------------|------------------|
@@ -163,7 +162,7 @@ sudo ./DaST_v0.x.x.x.sh
 
 ## Repository layout 📁
 
-- `DaST_v0.9.8.4.sh` (launcher)
+- `DaST_v0.x.x.x.sh` (launcher)
 - `lib/` (shared libraries: config, theme, priv, UI, helper)
 - `modules/` (feature modules)
 - `config/dast.conf` (auto-created on first run)
