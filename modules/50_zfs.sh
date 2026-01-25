@@ -101,16 +101,12 @@ fi
 # OS detection
 # -----------------------------------------------------------------------------
 __zfs_is_supported_os() {
-  # ZFS module supports Ubuntu and Ubuntu-derivatives with zfsutils-linux
-  local id id_like
+  # ZFS module registers on Ubuntu only.
+  local id
   . /etc/os-release 2>/dev/null || return 1
   id="${ID:-}"
-  id_like="${ID_LIKE:-}"
 
   [[ "$id" == "ubuntu" ]] && return 0
-  [[ "$id" == "debian" ]] && return 1
-  [[ "$id_like" == *"ubuntu"* ]] && return 0
-
   return 1
 }
 
@@ -140,7 +136,26 @@ __zfs_require_installed() {
   if __zfs_installed; then
     return 0
   fi
-  ui_msg "$MODULESPEC_TITLE" "❌ ZFS tools not found (zpool/zfs).\n\nInstall:\n  sudo apt-get update\n  sudo apt-get install -y zfsutils-linux\n\nThen rerun DaST."
+
+  if __zfs_is_neon; then
+    ui_msg "$MODULESPEC_TITLE" "❌ ZFS tools not found (zpool/zfs).
+
+KDE neon detected.
+
+DaST policy: do not use apt from within DaST on KDE neon.
+
+Please install ZFS tools using KDE neon guidance, then re-run this module."
+    return 1
+  fi
+
+  ui_msg "$MODULESPEC_TITLE" "❌ ZFS tools not found (zpool/zfs).
+
+Ubuntu detected.
+
+Install zfsutils-linux using DaST:
+  DaST -> APT -> Install packages -> zfsutils-linux
+
+Then rerun this ZFS module."
   return 1
 }
 
@@ -182,6 +197,224 @@ __zfs_textbox_from_cmd() {
 __zfs_danger_gate() {
   local title="$1" msg="$2"
   ui_confirm "$title" "$msg"
+}
+
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# ZFS helper functions (module-local)
+# -----------------------------------------------------------------------------
+__zfs_is_neon() {
+  . /etc/os-release 2>/dev/null || return 1
+  [[ "${ID:-}" == "neon" ]] && return 0
+  [[ "${NAME:-}" == *"KDE neon"* ]] && return 0
+  return 1
+}
+
+__zfs_warn_ubuntu_only() {
+  # DaST policy: KDE Neon must not run apt from within DaST.
+  if __zfs_is_neon; then
+    ui_msg "$MODULESPEC_TITLE" "⚠️ KDE neon detected.
+
+DaST policy: this module will not run apt on KDE neon.
+
+Please install ZFS tools using KDE neon guidance, then re-run this module."
+    return 1
+  fi
+
+  if __zfs_is_supported_os; then
+    return 0
+  fi
+
+  ui_msg "$MODULESPEC_TITLE" "⚠️ Unsupported OS for this module.
+
+This ZFS module is intended for Ubuntu.
+
+This module only loads on Ubuntu within DaST."
+  return 1
+}
+
+__zfs_sq() {
+  # Return a bash-safe single-quoted string for use inside bash -c "...".
+  # Example: __zfs_sq "/mnt/it's" -> '/mnt/it'"'"'s'
+  local s="$1"
+  printf "'%s'" "$(printf '%s' "$s" | sed "s/'/'\"'\"'/g")"
+}
+
+__zfs_type_to_confirm() {
+  local title="$1" msg="$2" want="$3" got
+  got="$(ui_input "$title" "$msg" "")" || return 1
+  [[ "$got" == "$want" ]]
+}
+
+__zfs_valid_snap_tag() {
+  local tag="$1"
+  [[ -n "$tag" ]] || return 1
+  [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+__zfs_valid_pool_name() {
+  local p="$1"
+  [[ -n "$p" ]] || return 1
+  [[ "$p" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]
+}
+
+__zfs_set_pool_prop() {
+  __zfs_require_installed || return 1
+  __zfs_require_root || return 1
+  local pool="$1" prop="$2" val="$3"
+  __zfs_danger_gate "$MODULESPEC_TITLE" "Set pool property?
+
+Pool: $pool
+$prop = $val" || return 1
+  __zfs_programbox "$MODULESPEC_TITLE" "zpool set ${prop}=${val} -- $(printf %q "$pool") 2>&1 || true; echo; zpool get -H -o property,value ${prop} -- $(printf %q "$pool") 2>/dev/null || true"
+}
+
+__zfs_set_dataset_prop() {
+  __zfs_require_installed || return 1
+  __zfs_require_root || return 1
+  local ds="$1" prop="$2" val="$3"
+  __zfs_danger_gate "$MODULESPEC_TITLE" "Set dataset property?
+
+Dataset: $ds
+$prop = $val" || return 1
+  __zfs_programbox "$MODULESPEC_TITLE" "zfs set ${prop}=$(printf %q "$val") -- $(printf %q "$ds") 2>&1 || true; echo; zfs get -H -o property,value ${prop} -- $(printf %q "$ds") 2>/dev/null || true"
+}
+
+__zfs_list_disks() {
+  # Prefer /dev/disk/by-id for stable identifiers where possible.
+  local -a out=()
+  local p
+  if [[ -d /dev/disk/by-id ]]; then
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      [[ "$p" == *"-part"* ]] && continue
+      [[ "$p" == *"wwn-"* || "$p" == *"ata-"* || "$p" == *"nvme-"* || "$p" == *"scsi-"* ]] || continue
+      out+=("/dev/disk/by-id/$p")
+    done < <(ls -1 /dev/disk/by-id 2>/dev/null | sort -u || true)
+  fi
+
+  if [[ ${#out[@]} -gt 0 ]]; then
+    printf '%s\n' "${out[@]}"
+    return 0
+  fi
+
+  # Fallback: /dev/<name> from lsblk
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    printf '/dev/%s\n' "$p"
+  done < <(lsblk -dn -o NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}' || true)
+}
+
+__zfs_pick_single_disk_menu() {
+  local prompt="${1:-Pick a disk:}"
+  local -a opts=() d
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    opts+=("$d" "")
+  done < <(__zfs_list_disks)
+
+  [[ ${#opts[@]} -gt 0 ]] || { ui_msg "$MODULESPEC_TITLE" "❌ No disks detected."; return 1; }
+  ui_menu "$MODULESPEC_TITLE" "$prompt" "${opts[@]}"
+}
+
+__zfs_checklist_disks() {
+  # Minimal multi-select using repeated menus (DaST UI has no checklist primitive here).
+  local -a picked=()
+  local d ans
+  while true; do
+    d="$(__zfs_pick_single_disk_menu "Pick a disk:")" || break
+    if [[ " ${picked[*]} " == *" $d "* ]]; then
+      ui_msg "$MODULESPEC_TITLE" "Already selected:
+$d"
+      continue
+    fi
+    picked+=("$d")
+    ans="$(
+      ui_menu "$MODULESPEC_TITLE" "Selected ${#picked[@]} disk(s).
+
+Add another?"         "ADD" "➕ Add another disk"         "DONE" "✅ Done"
+    )" || ans="DONE"
+    [[ "$ans" == "ADD" ]] || break
+  done
+
+  [[ ${#picked[@]} -gt 0 ]] || return 1
+  printf '%s\n' "${picked[@]}"
+}
+
+__zfs_pick_topology() {
+  ui_menu "$MODULESPEC_TITLE" "Pick topology:"     "stripe" "⚡ stripe (no redundancy)"     "mirror" "🪞 mirror"     "raidz1" "🧱 raidz1 (1 parity)"     "raidz2" "🧱🧱 raidz2 (2 parity)"     "raidz3" "🧱🧱🧱 raidz3 (3 parity)"
+}
+
+__zfs_topology_min_disks() {
+  case "$1" in
+    stripe) echo 1 ;;
+    mirror) echo 2 ;;
+    raidz1) echo 3 ;;
+    raidz2) echo 4 ;;
+    raidz3) echo 5 ;;
+    *) echo 1 ;;
+  esac
+}
+
+__zfs_pick_mountpoint() {
+  local pool="$1"
+  local choice mp
+  choice="$(
+    ui_menu "$MODULESPEC_TITLE" "Pick mountpoint for pool root dataset:
+
+Pool: $pool"       "/$pool" "📁 Default: /$pool"       "none" "🚫 none (do not mount)"       "custom" "✏️ Custom path"
+  )" || return 1
+
+  if [[ "$choice" == "custom" ]]; then
+    mp="$(ui_input "$MODULESPEC_TITLE" "Enter mountpoint path (absolute) or 'none':" "/$pool")" || return 1
+    printf '%s\n' "$mp"
+    return 0
+  fi
+
+  printf '%s\n' "$choice"
+}
+
+__zfs_disk_is_mounted() {
+  local dev="$1"
+  if command -v findmnt >/dev/null 2>&1; then
+    findmnt -rn -S "$dev" >/dev/null 2>&1 && return 0
+  fi
+  grep -qsE "^${dev//\//\\/}[[:space:]]" /proc/mounts 2>/dev/null
+}
+
+__zfs_disk_looks_in_use() {
+  local dev="$1"
+  __zfs_disk_is_mounted "$dev" && return 0
+
+  if command -v wipefs >/dev/null 2>&1; then
+    wipefs -n "$dev" 2>/dev/null | grep -qE '^[[:space:]]*offset' && return 0
+  fi
+
+  if command -v lsblk >/dev/null 2>&1; then
+    lsblk -rn -o TYPE "$dev" 2>/dev/null | grep -q "^part$" && return 0
+  fi
+
+  return 1
+}
+
+__zfs_suggest_ashift_for_disks() {
+  echo 12
+}
+
+__zfs_pick_pool_vdev() {
+  local pool="$1"
+  local -a opts=() v
+  while IFS= read -r v; do
+    [[ -n "$v" ]] || continue
+    opts+=("$v" "")
+  done < <(zpool status -P -L -- "$pool" 2>/dev/null | awk '/^[[:space:]]*\//{gsub(/^[[:space:]]+/,""); print $1}' | sort -u || true)
+
+  [[ ${#opts[@]} -gt 0 ]] || { ui_msg "$MODULESPEC_TITLE" "❌ No vdev paths found for pool:
+
+$pool"; return 1; }
+  ui_menu "$MODULESPEC_TITLE" "Pick a vdev/device from pool:
+
+$pool" "${opts[@]}"
 }
 
 # -----------------------------------------------------------------------------
@@ -309,6 +542,12 @@ zfs_action_dataset_status() {
        -- '$ds' 2>/dev/null || true"
 }
 
+# Backward-compat: menus refer to dataset info by this name
+zfs_action_dataset_info() {
+  zfs_action_dataset_status
+}
+
+
 zfs_action_events() { __zfs_require_installed || return 0; __zfs_programbox "$MODULESPEC_TITLE" "zpool events -v 2>/dev/null || zpool events 2>/dev/null || true"; }
 
 # -----------------------------------------------------------------------------
@@ -318,7 +557,7 @@ zfs_action_history() {
   __zfs_require_installed || return 0
 
   local pool max_lines mode timeout_secs has_timeout
-  local tmp raw cmd_rc tail_rc
+  local tmp raw err cmd_rc tail_rc
   local choice custom_timeout
   local old_trap_int
 
@@ -329,6 +568,7 @@ zfs_action_history() {
 
   tmp="$(mktemp -t dast-zpool-history.XXXXXX 2>/dev/null || mktemp "/tmp/dast-zpool-history.XXXXXX")"
   raw="${tmp}.raw"
+  err="${tmp}.err"
 
   # --- Mode picker (default = recommended 300s) ---
   choice="$(
@@ -344,7 +584,7 @@ Choose how to proceed:" \
       "TCUST" "Proceed (custom timeout)" \
       "FOREVER" "Proceed (no timeout, may take a long time)" \
       "BACK" "🔙️ Back"
-  )" || { rm -f "$tmp" "$raw" 2>/dev/null || true; return 0; }
+  )" || { rm -f "$tmp" "$raw" "$err" 2>/dev/null || true; return 0; }
 
   case "$choice" in
     T300) mode="timeout"; timeout_secs=300 ;;
@@ -356,12 +596,12 @@ Choose how to proceed:" \
 - Recommended: 300
 - Use 0 for 'no timeout' (same as the forever option)." \
           "$timeout_secs"
-      )" || { rm -f "$tmp" "$raw" 2>/dev/null || true; return 0; }
+      )" || { rm -f "$tmp" "$raw" "$err" 2>/dev/null || true; return 0; }
 
       # Trim spaces; basic numeric validation.
       custom_timeout="${custom_timeout//[[:space:]]/}"
       if [[ -z "$custom_timeout" ]]; then
-        rm -f "$tmp" "$raw" 2>/dev/null || true
+        rm -f "$tmp" "$raw" "$err" 2>/dev/null || true
         return 0
       fi
       if [[ "$custom_timeout" =~ ^[0-9]+$ ]]; then
@@ -373,12 +613,12 @@ Choose how to proceed:" \
         fi
       else
         ui_msg "$MODULESPEC_TITLE" "❌ Invalid timeout value.\n\nMust be a number."
-        rm -f "$tmp" "$raw" 2>/dev/null || true
+        rm -f "$tmp" "$raw" "$err" 2>/dev/null || true
         return 0
       fi
       ;;
     FOREVER) mode="forever" ;;
-    *) rm -f "$tmp" "$raw" 2>/dev/null || true; return 0 ;;
+    *) rm -f "$tmp" "$raw" "$err" 2>/dev/null || true; return 0 ;;
   esac
 
   # Determine if timeout exists
@@ -392,21 +632,27 @@ Choose how to proceed:" \
 
   (
     # Within subshell: allow cleanup on INT
-    trap 'rm -f "$tmp" "$raw" 2>/dev/null || true; exit 130' INT
+    trap 'rm -f "$tmp" "$raw" "$err" 2>/dev/null || true; exit 130' INT
 
     if [[ "$mode" == "timeout" && "$has_timeout" -eq 1 ]]; then
-      timeout "${timeout_secs}" zpool history -il -- "$pool" >"$raw" 2>"$tmp"
+      timeout "${timeout_secs}" zpool history -il -- "$pool" >"$raw" 2>"$err"
       cmd_rc=$?
     else
-      zpool history -il -- "$pool" >"$raw" 2>"$tmp"
+      zpool history -il -- "$pool" >"$raw" 2>"$err"
       cmd_rc=$?
     fi
 
     if [[ "$cmd_rc" -ne 0 ]]; then
-      echo "Command returned rc=$cmd_rc" >>"$tmp"
-      echo >>"$tmp"
-      echo "stderr:" >>"$tmp"
-      cat "$tmp" >>"$tmp" 2>/dev/null || true
+      {
+        echo "Command returned rc=$cmd_rc"
+        echo
+        echo "stderr:"
+        if [[ -s "$err" ]]; then
+          cat "$err"
+        else
+          echo "(no stderr captured)"
+        fi
+      } >>"$tmp"
       exit "$cmd_rc"
     fi
 
@@ -427,7 +673,7 @@ Choose how to proceed:" \
     trap - INT 2>/dev/null || true
   fi
 
-  rm -f "$tmp" "$raw" 2>/dev/null || true
+  rm -f "$tmp" "$raw" "$err" 2>/dev/null || true
 
   if [[ "$cmd_rc" -eq 124 ]]; then
     ui_msg "$MODULESPEC_TITLE" "📄 Timeout reached.\n\nTry a higher timeout or the 'forever' option."
@@ -559,6 +805,7 @@ zfs_action_import_show() { __zfs_require_installed || return 0; __zfs_programbox
 
 zfs_action_import_pool_basic() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local pool
   pool="$(__zfs_pick_importable_pool)" || return 0
   __zfs_danger_gate "$MODULESPEC_TITLE" "Import pool:\n\n$pool" || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
@@ -568,6 +815,7 @@ zfs_action_import_pool_basic() {
 
 zfs_action_export_pool() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local pool
   pool="$(__zfs_pick_pool)" || return 0
   __zfs_danger_gate "$MODULESPEC_TITLE" "Export pool:\n\n$pool\n\nThis unmounts datasets and makes it unavailable until imported again." || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
@@ -580,6 +828,7 @@ zfs_action_export_pool() {
 # -----------------------------------------------------------------------------
 zfs_action_import_pool_advanced() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local pool
   pool="$(__zfs_pick_importable_pool)" || return 0
 
@@ -599,7 +848,7 @@ zfs_action_import_pool_advanced() {
   [[ "$force" == "on" ]] && args+=" -f"
   [[ "$nomount" == "on" ]] && args+=" -N"
   [[ "$readonly" == "on" ]] && args+=" -o readonly=on"
-  [[ -n "$altroot" ]] && args+=" -R '${altroot}'"
+  [[ -n "$altroot" ]] && args+=" -R $(__zfs_sq "$altroot")"
 
   __zfs_danger_gate "$MODULESPEC_TITLE" \
     "Advanced import will run:\n\nzpool import${args} -- '$pool'" \
@@ -624,6 +873,7 @@ zfs_action_snap_list() {
 
 zfs_action_snap_create() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local ds tag rec
   ds="$(__zfs_pick_dataset)" || return 0
   tag="$(ui_input "$MODULESPEC_TITLE" "📸 Create snapshot for:\n\n$ds\n\nEnter snapshot tag (A-Z a-z 0-9 . _ -):" "")" || return 0
@@ -695,6 +945,7 @@ __zfs_pick_mounted_snapshot_mount() {
 
 zfs_action_snap_mount() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
 
   local ds snap tag mp snap_path tgt default_tgt
   ds="$(__zfs_pick_dataset)" || return 0
@@ -714,7 +965,7 @@ zfs_action_snap_mount() {
   fi
 
   default_tgt="/mnt/zfs-snapshots/${ds//@/_}@${tag}"
-  tgt="$(ui_input "$MODULESPEC_TITLE" "🗂️ Mount snapshot (read-only browse)\n\nSnapshot:\n$snap\n\nSource path:\n$snap_path\n\nEnter mount target directory:" "$default_tgt")" || return 0
+  tgt="$(ui_input "$MODULESPEC_TITLE" "🗂️ Mount snapshot (intended read-only browse)\n\nSnapshot:\n$snap\n\nSource path:\n$snap_path\n\nEnter mount target directory:" "$default_tgt")" || return 0
   [[ -n "$tgt" ]] || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
 
   if [[ "$tgt" != /* ]]; then
@@ -732,7 +983,7 @@ zfs_action_snap_mount() {
     return 0
   fi
 
-  __zfs_danger_gate "$MODULESPEC_TITLE" "Mount snapshot for browsing (read-only).\n\nSnapshot:\n$snap\n\nMount at:\n$tgt" || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
+  __zfs_danger_gate "$MODULESPEC_TITLE" "Mount snapshot for browsing (intended read-only).\n\nSnapshot:\n$snap\n\nMount at:\n$tgt" || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
   __zfs_type_to_confirm "$MODULESPEC_TITLE" "Type the snapshot name to confirm:\n\n$snap" "$snap" || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
 
   __zfs_programbox "$MODULESPEC_TITLE" \
@@ -755,6 +1006,7 @@ echo 'To unmount later, use: 🧹 Unmount snapshot'
 
 zfs_action_snap_unmount() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
 
   local sel kind tgt tmp
   sel="$(__zfs_pick_mounted_snapshot_mount)" || return 0
@@ -826,6 +1078,7 @@ $tgt"
 
 zfs_action_snap_rollback() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local ds snap rec
   ds="$(__zfs_pick_dataset)" || return 0
   snap="$(__zfs_pick_snapshot_for_dataset "$ds")" || return 0
@@ -843,6 +1096,7 @@ zfs_action_snap_rollback() {
 
 zfs_action_snap_destroy() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local ds snap
   ds="$(__zfs_pick_dataset)" || return 0
   snap="$(__zfs_pick_snapshot_for_dataset "$ds")" || return 0
@@ -858,6 +1112,7 @@ zfs_action_snap_destroy() {
 # -----------------------------------------------------------------------------
 zfs_action_dataset_create() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local pool ds parent mp
   pool="$(__zfs_pick_pool)" || return 0
 
@@ -875,7 +1130,9 @@ zfs_action_dataset_create() {
   __zfs_type_to_confirm "$MODULESPEC_TITLE" "Type exactly to confirm dataset create:\n\n$parent" "$parent" || { ui_msg "$MODULESPEC_TITLE" "Cancelled."; return 0; }
 
   if [[ -n "$mp" ]]; then
-    __zfs_programbox "$MODULESPEC_TITLE" "zfs create -o mountpoint='${mp}' -- '$parent' 2>&1 || true; echo; zfs list -- '$parent' 2>/dev/null || true"
+    local mp_sq
+    mp_sq="$(__zfs_sq "$mp")"
+    __zfs_programbox "$MODULESPEC_TITLE" "zfs create -o mountpoint=${mp_sq} -- '$parent' 2>&1 || true; echo; zfs list -- '$parent' 2>/dev/null || true"
   else
     __zfs_programbox "$MODULESPEC_TITLE" "zfs create -- '$parent' 2>&1 || true; echo; zfs list -- '$parent' 2>/dev/null || true"
   fi
@@ -883,6 +1140,7 @@ zfs_action_dataset_create() {
 
 zfs_action_dataset_destroy() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local ds
   ds="$(__zfs_pick_dataset)" || return 0
 
@@ -913,8 +1171,8 @@ zfs_action_dataset_props_menu() {
         "ACL"  "🔐 acltype" \
         "SYNC" "🧨 sync" \
         "LB"   "⚖️ logbias" \
-        "PC"   "🗄️ primarycache" \
-        "SC"   "🗄️ secondarycache" \
+        "PC"   "💾 primarycache" \
+        "SC"   "💾 secondarycache" \
         "CANCEL" "🔙️ Cancel"
     )" || c="BACK"
 
@@ -991,6 +1249,7 @@ zfs_action_dataset_props_menu() {
 # Pool create/destroy
 zfs_action_pool_create() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
 
   local pool
   pool="$(ui_input "$MODULESPEC_TITLE" "➕ Create a new pool\n\nEnter pool name:" "")" || return 0
@@ -1037,7 +1296,7 @@ zfs_action_pool_create() {
   if [[ "$mp" == "none" ]]; then
     mp_arg="-m none"
   else
-    mp_arg="-m '${mp}'"
+    mp_arg="-m $(__zfs_sq "$mp")"
   fi
 
   local vdev=""
@@ -1095,6 +1354,7 @@ echo 'Done.'
 
 zfs_action_pool_destroy() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local pool
   pool="$(__zfs_pick_pool)" || return 0
 
@@ -1113,6 +1373,7 @@ zfs_action_pool_destroy() {
 # -----------------------------------------------------------------------------
 zfs_action_pool_props_menu() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   local pool
   pool="$(__zfs_pick_pool)" || return 0
 
@@ -1163,6 +1424,7 @@ zfs_action_pool_props_menu() {
 # -----------------------------------------------------------------------------
 zfs_action_vdev_replace() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   ui_msg "$MODULESPEC_TITLE" "🧰 Replace device\n\nThis is state-changing.\nYou will confirm twice."
 
   local pool old new
@@ -1187,6 +1449,7 @@ zfs_action_vdev_replace() {
 
 zfs_action_vdev_attach() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   ui_msg "$MODULESPEC_TITLE" "🧰 Attach device\n\nUsually used to turn a single disk into a mirror by attaching a new disk.\nYou will confirm twice."
 
   local pool existing new
@@ -1206,6 +1469,7 @@ zfs_action_vdev_attach() {
 
 zfs_action_vdev_detach() {
   __zfs_require_installed || return 0
+  __zfs_require_root || return 0
   ui_msg "$MODULESPEC_TITLE" "🧰 Detach device\n\nOnly valid on mirrors.\nYou will confirm twice."
 
   local pool dev
@@ -1271,6 +1535,7 @@ zfs_action_vdev_remove() {
 # -----------------------------------------------------------------------------
 zfs_action_install() {
   __zfs_warn_ubuntu_only || return 0
+  __zfs_require_root || return 0
   if __zfs_installed; then
     ui_msg "$MODULESPEC_TITLE" "✅ ZFS tools already appear to be installed."
     return 0
@@ -1283,6 +1548,7 @@ zfs_action_install() {
 
 zfs_action_purge() {
   __zfs_warn_ubuntu_only || return 0
+  __zfs_require_root || return 0
   if ! __zfs_installed; then
     ui_msg "$MODULESPEC_TITLE" "📄 ZFS tools do not appear to be installed."
     return 0
@@ -1330,7 +1596,7 @@ zfs_menu_info() {
         "EVENTS" "📣 Events (zpool events)" \
         "HIST"   "🕰️ History (zpool history)" \
         "VERS"   "🏷️ Versions, module, mounts" \
-        "ARC"    "🗄️ ARC stats" \
+        "ARC"    "💾 ARC stats" \
         "ARCSUM" "🧾 ARC summary" \
         "HOGS"   "🐘 Space hogs" \
         "CANCEL" "🔙️ Cancel"
@@ -1502,13 +1768,13 @@ zfs_menu_vdev_ops() {
 }
 
 zfs_menu_cache_log() {
-  ui_msg "$MODULESPEC_TITLE" "🗄️ Cache and log devices\n\nSLOG and L2ARC are advanced.\nYou will be asked to confirm twice."
+  ui_msg "$MODULESPEC_TITLE" "💾 Cache and log devices\n\nSLOG and L2ARC are advanced.\nYou will be asked to confirm twice."
   while true; do
     local c
     c="$(
-      ui_menu "$MODULESPEC_TITLE" "🗄️ Cache and log" \
+      ui_menu "$MODULESPEC_TITLE" "💾 Cache and log" \
         "SLOG" "⚡ Add SLOG (log vdev) 🧨" \
-        "L2"   "🗄️ Add L2ARC (cache vdev) 🧨" \
+        "L2"   "💾 Add L2ARC (cache vdev) 🧨" \
         "REM"  "🧽 Remove device (zpool remove) 🧨" \
         "CANCEL" "🔙️ Cancel"
     )" || c="CANCEL"
@@ -1531,12 +1797,31 @@ module_ZFS() {
   os="$(__zfs_os_info)"
   if __zfs_installed; then state="✅ installed"; else state="❌ not installed"; fi
 
+  if ! __zfs_installed; then
+    while true; do
+      local choice
+      choice="$(
+        ui_menu "ZFS (tools missing)" \
+          "ZFS tools (zfsutils-linux) are not installed. You can install them here." \
+          "INST" "📦 Install" \
+          "BACK" "🔙️ Back"
+      )" || choice="BACK"
+
+      case "$choice" in
+        INST) zfs_menu_install ;;
+        BACK) break ;;
+        *) break ;;
+      esac
+    done
+    return 0
+  fi
+
   while true; do
     local choice
     choice="$(
       ui_menu "$MODULESPEC_TITLE" \
         "ZFS tools: $state | OS: $os" \
-        "HEALTH" "❤️ Health checks" \
+        "HEALTH" "💖 Health checks" \
         "INFO"   "📄 Info and reporting" \
         "HIST"   "📜 Pool history (view)" \
         "MAINT"  "🧰 Maintenance (scrub, trim)" \
@@ -1544,7 +1829,7 @@ module_ZFS() {
         "IMPEXP" "📦 Import and export" \
         "MGMT"   "🧱 Pools and datasets" \
         "VDEV"   "🧰 Vdev operations (replace/attach/detach)" \
-        "CACHE"  "🗄️  Cache and log (SLOG/L2ARC)" \
+        "CACHE"  "💾 Cache and log (SLOG/L2ARC)" \
         "INST"   "📦 Install and purge" \
         "BACK"   "🔙️ Back"
     )" || choice="BACK"
